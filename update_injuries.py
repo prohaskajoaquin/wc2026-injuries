@@ -1,5 +1,4 @@
 import urllib.request
-import urllib.error
 import json
 import os
 import re
@@ -14,18 +13,14 @@ TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 
 today = datetime.now().strftime('%A, %B %d, %Y')
 
-# --- Call Claude with web search ---
 payload = {
   "model": "claude-sonnet-4-5",
   "max_tokens": 4000,
   "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-  "system": f"""You are a football journalist covering FIFA World Cup 2026. Today is {today}.
-Search the web thoroughly for ALL injured or withdrawn players from the 48 official FIFA World Cup 2026 squads.
-After searching, return ONLY a valid JSON array with no markdown, no backticks, no explanation. Just the raw JSON array starting with [ and ending with ]:
-[{{"player":string,"team":string,"flag":string,"pos":string,"club":string,"status":"out"|"doubt","injury":string,"replacement":string|null,"timeline":string|null,"link":string,"link_label":string,"confirmed_date":string}}]""",
+  "system": f"You are a football journalist covering FIFA World Cup 2026. Today is {today}. Search the web for ALL injured or withdrawn players from official FIFA World Cup 2026 squads. Your ENTIRE response must be ONLY a JSON array. No sentences, no explanation, no markdown. Start your response with [ and end with ].",
   "messages": [{
     "role": "user",
-    "content": f"Today is {today}. Search for: 'World Cup 2026 injury withdrawal', 'FIFA World Cup 2026 injured players', 'Mundial 2026 lesionados'. Check Argentina, Brazil, France, Spain, England, USA, Portugal, Germany. Return ONLY the raw JSON array, no markdown, no backticks."
+    "content": f"Today is {today}. Search for World Cup 2026 injuries. Return ONLY a JSON array (starting with [ and ending with ]), no other text: [{{\"player\":string,\"team\":string,\"flag\":string,\"pos\":string,\"club\":string,\"status\":\"out\"|\"doubt\",\"injury\":string,\"replacement\":string|null,\"timeline\":string|null,\"link\":string,\"link_label\":string,\"confirmed_date\":string}}]"
   }]
 }
 
@@ -42,31 +37,33 @@ req = urllib.request.Request(
 with urllib.request.urlopen(req, timeout=300) as resp:
   data = json.loads(resp.read())
 
-# Extract text from response
 texts = []
 for block in data.get('content', []):
   if block.get('type') == 'text':
     texts.append(block.get('text', ''))
 
 full_text = '\n'.join(texts)
-print("Claude response (first 500 chars):", full_text[:500])
+print("Claude response (first 300 chars):", full_text[:300])
 
-# Strip markdown backticks and find JSON array
+# Clean markdown and find JSON - try multiple strategies
 clean_text = re.sub(r'```json\s*', '', full_text)
 clean_text = re.sub(r'```\s*', '', clean_text)
-match = re.search(r'\[[\s\S]*\]', clean_text)
 
-if not match:
-  print("ERROR: No JSON array found in response")
-  players = []
-else:
+players = []
+
+# Strategy 1: find first [ to last ]
+start = clean_text.find('[')
+end = clean_text.rfind(']')
+if start != -1 and end != -1 and end > start:
   try:
-    players = json.loads(match.group(0))
+    players = json.loads(clean_text[start:end+1])
     players = [p for p in players if p.get('status') in ('out', 'doubt')]
-    print(f"Found {len(players)} players")
+    print(f"Strategy 1 found {len(players)} players")
   except Exception as e:
-    print(f"ERROR parsing JSON: {e}")
-    players = []
+    print(f"Strategy 1 failed: {e}")
+
+if not players:
+  print("ERROR: Could not parse any players from response")
 
 # --- Get previous data from KV ---
 kv_url = f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/values/injury_data'
@@ -85,7 +82,7 @@ except Exception as e:
 
 update_count += 1
 
-# --- Detect changes for Telegram ---
+# --- Detect changes ---
 alerts = []
 prev_map = {p['player']: p for p in prev_data}
 
@@ -104,7 +101,7 @@ for p in players:
       + "\n🌐 wc2026-injuries.prohaskajoaquin.workers.dev"
     )
   elif old.get('status') != p.get('status'):
-    emoji = '🚨' if p['status'] == 'out' else ('✅' if p['status'] == 'fit' else '⚠️')
+    emoji = '🚨' if p['status'] == 'out' else '✅'
     alerts.append(
       f"{emoji} <b>STATUS CHANGE</b>\n\n"
       f"👤 <b>{p['player']}</b> {p.get('flag','')}\n"
@@ -113,7 +110,6 @@ for p in players:
       + "\n🌐 wc2026-injuries.prohaskajoaquin.workers.dev"
     )
 
-# --- Send Telegram ---
 def send_telegram(text):
   if not TELEGRAM_BOT_TOKEN:
     return
@@ -152,13 +148,12 @@ put_req = urllib.request.Request(
 )
 with urllib.request.urlopen(put_req, timeout=10) as resp:
   result = json.loads(resp.read())
-  print(f"KV write result: {result}")
+  print(f"KV write: {result}")
 
 out_count = len([p for p in players if p.get('status') == 'out'])
 doubt_count = len([p for p in players if p.get('status') == 'doubt'])
-print(f"✅ Update #{update_count} complete — {len(players)} players ({out_count} out, {doubt_count} doubt). {len(alerts)} alerts sent.")
+print(f"✅ Update #{update_count} — {len(players)} players ({out_count} out, {doubt_count} doubt). {len(alerts)} alerts.")
 
-# --- Send Telegram summary ---
 summary = (
   f"🤖 <b>WC2026 Injury Tracker — Update #{update_count}</b>\n\n"
   f"🚨 Confirmed out: <b>{out_count}</b>\n"
