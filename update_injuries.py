@@ -113,23 +113,33 @@ for block in data.get('content', []):
 full_text = '\n'.join(texts)
 print("Claude response (first 300 chars):", full_text[:300])
 
-# Extract JSON - try <injuries> tags first, then fallback
+# Extract JSON - multiple strategies
 players = []
 json_str = ''
-tag_match = re.search(r'<injuries>([\s\S]*?)</injuries>', full_text)
+
+# Strategy 1: <injuries>...</injuries> tags (with or without closing tag)
+tag_match = re.search(r'<injuries>([\s\S]*?)(?:</injuries>|$)', full_text)
 if tag_match:
-  json_str = tag_match.group(1).strip()
-  json_str = re.sub(r'```json\s*', '', json_str)
-  json_str = re.sub(r'```\s*', '', json_str).strip()
-  print("Found <injuries> tags")
-else:
+  candidate = tag_match.group(1).strip()
+  candidate = re.sub(r'```json\s*', '', candidate)
+  candidate = re.sub(r'```\s*', '', candidate).strip()
+  # Only use if it contains a JSON array
+  if '[' in candidate:
+    s = candidate.find('[')
+    e = candidate.rfind(']')
+    if e > s:
+      json_str = candidate[s:e+1]
+      print("Found JSON in <injuries> tags")
+
+# Strategy 2: find first [ to last ] in full text
+if not json_str:
   clean_text = re.sub(r'```json\s*', '', full_text)
   clean_text = re.sub(r'```\s*', '', clean_text)
   start = clean_text.find('[')
   end = clean_text.rfind(']')
-  if start != -1 and end != -1:
+  if start != -1 and end != -1 and end > start:
     json_str = clean_text[start:end+1]
-  print("WARNING: No <injuries> tags, using fallback")
+  print("WARNING: Using fallback [ ] extraction")
 
 if json_str:
   try:
