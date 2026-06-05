@@ -1,1 +1,133 @@
+name: Update WC2026 Injuries
 
+on:
+  schedule:
+    - cron: '0 * * * *'   # Every hour
+  workflow_dispatch:        # Manual trigger from GitHub UI
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Fetch injuries from Claude + web search
+        id: fetch
+        run: |
+          TODAY=$(date -u +"%A, %B %d, %Y")
+          
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-sonnet-4-20250514\",
+              \"max_tokens\": 4000,
+              \"tools\": [{\"type\": \"web_search_20250305\", \"name\": \"web_search\"}],
+              \"system\": \"You are a football journalist covering FIFA World Cup 2026. Today is ${TODAY}. Your job is to find ALL injured or withdrawn players from the 48 official FIFA World Cup 2026 squads. Search the web thoroughly for recent injury news. Only include players from official squads submitted to FIFA. Return ONLY a valid JSON array with no markdown, no explanation:\\n[{\\\"player\\\":string,\\\"team\\\":string,\\\"flag\\\":string,\\\"pos\\\":string,\\\"club\\\":string,\\\"status\\\":\\\"out\\\"|\\\"doubt\\\",\\\"injury\\\":string,\\\"replacement\\\":string|null,\\\"timeline\\\":string|null,\\\"link\\\":string,\\\"link_label\\\":string,\\\"confirmed_date\\\":string}]\",
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": \"Today is ${TODAY}. Search the web for ALL FIFA World Cup 2026 injury news. Search for: 'World Cup 2026 injury withdrawal', 'FIFA World Cup 2026 injured players', 'Mundial 2026 lesionados', and check specific big teams like Argentina, Brazil, France, Spain, England, USA. Find every player who is confirmed out or doubtful. Return only the JSON array.\"
+              }]
+            }")
+          
+          echo "RESPONSE<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESPONSE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Parse and save to Cloudflare KV
+        run: |
+          RESPONSE='${{ steps.fetch.outputs.RESPONSE }}'
+          
+          # Extract JSON array from response
+          DATA=$(echo "$RESPONSE" | python3 -c "
+          import sys, json, re
+
+          raw = sys.stdin.read()
+          
+          try:
+              parsed = json.loads(raw)
+          except:
+              print('[]')
+              sys.exit(0)
+
+          # Gather all text blocks (including tool results)
+          texts = []
+          for block in parsed.get('content', []):
+              if block.get('type') == 'text':
+                  texts.append(block.get('text', ''))
+              elif block.get('type') == 'tool_result':
+                  for sub in block.get('content', []):
+                      if sub.get('type') == 'text':
+                          texts.append(sub.get('text', ''))
+
+          full_text = '\n'.join(texts)
+          
+          # Find JSON array
+          match = re.search(r'\[[\s\S]*\]', full_text)
+          if match:
+              try:
+                  arr = json.loads(match.group(0))
+                  # Filter only out/doubt
+                  arr = [p for p in arr if p.get('status') in ('out', 'doubt')]
+                  print(json.dumps(arr))
+              except:
+                  print('[]')
+          else:
+              print('[]')
+          ")
+          
+          echo "Parsed data: $DATA"
+          
+          # Wrap with metadata
+          UPDATE_COUNT_RAW=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_NAMESPACE_ID }}/values/injury_data" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('updateCount',0))" 2>/dev/null || echo "0")
+          
+          UPDATE_COUNT=$((UPDATE_COUNT_RAW + 1))
+          NOW=$(date -u +%s)000
+          
+          PAYLOAD=$(python3 -c "
+          import json, sys
+          data = json.loads('''$DATA''')
+          payload = {
+              'data': data,
+              'lastUpdated': $NOW,
+              'updateCount': $UPDATE_COUNT
+          }
+          print(json.dumps(payload))
+          ")
+          
+          # Save to Cloudflare KV
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_NAMESPACE_ID }}/values/injury_data" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD")
+          
+          echo "Cloudflare KV write status: $HTTP_STATUS"
+          
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "ERROR: Failed to write to KV"
+            exit 1
+          fi
+          
+          PLAYER_COUNT=$(echo "$DATA" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))")
+          echo "✅ Update #$UPDATE_COUNT complete — $PLAYER_COUNT players tracked."
+
+      - name: Send Telegram summary
+        if: always()
+        run: |
+          DATA=$(curl -s \
+            "https://api.cloudflare.com/client/v4/accounts/${{ secrets.CF_ACCOUNT_ID }}/storage/kv/namespaces/${{ secrets.CF_KV_NAMESPACE_ID }}/values/injury_data" \
+            -H "Authorization: Bearer ${{ secrets.CF_API_TOKEN }}")
+          
+          COUNT=$(echo "$DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('data',[])))" 2>/dev/null || echo "?")
+          OUT=$(echo "$DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len([p for p in d.get('data',[]) if p.get('status')=='out']))" 2>/dev/null || echo "?")
+          DOUBT=$(echo "$DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len([p for p in d.get('data',[]) if p.get('status')=='doubt']))" 2>/dev/null || echo "?")
+          UPDATE=$(echo "$DATA" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('updateCount','?'))" 2>/dev/null || echo "?")
+          
+          MESSAGE="🤖 <b>WC2026 Injury Tracker — Update #${UPDATE}</b>%0A%0A🚨 Confirmed out: <b>${OUT}</b>%0A⚠️ Doubt: <b>${DOUBT}</b>%0A📊 Total tracked: <b>${COUNT}</b>%0A%0A🌐 wc2026-injuries.prohaskajoaquin.workers.dev"
+          
+          curl -s -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
+            -d "chat_id=@wc2026injuryalerts&text=${MESSAGE}&parse_mode=HTML&disable_web_page_preview=true"
