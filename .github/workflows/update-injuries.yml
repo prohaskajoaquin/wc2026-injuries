@@ -2,7 +2,7 @@ name: Update WC2026 Injuries
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '5 * * * *'
   workflow_dispatch:
 
 jobs:
