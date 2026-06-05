@@ -21,7 +21,7 @@ jobs:
             -H "x-api-key: ${{ secrets.ANTHROPIC_API_KEY }}" \
             -H "anthropic-version: 2023-06-01" \
             -d "{
-              \"model\": \"claude-sonnet-4-20250514\",
+              \"model\": \"claude-sonnet-4-5\",
               \"max_tokens\": 4000,
               \"tools\": [{\"type\": \"web_search_20250305\", \"name\": \"web_search\"}],
               \"system\": \"You are a football journalist covering FIFA World Cup 2026. Today is ${TODAY}. Your job is to find ALL injured or withdrawn players from the 48 official FIFA World Cup 2026 squads. Search the web thoroughly for recent injury news. Only include players from official squads submitted to FIFA. Return ONLY a valid JSON array with no markdown, no explanation:\\n[{\\\"player\\\":string,\\\"team\\\":string,\\\"flag\\\":string,\\\"pos\\\":string,\\\"club\\\":string,\\\"status\\\":\\\"out\\\"|\\\"doubt\\\",\\\"injury\\\":string,\\\"replacement\\\":string|null,\\\"timeline\\\":string|null,\\\"link\\\":string,\\\"link_label\\\":string,\\\"confirmed_date\\\":string}]\",
