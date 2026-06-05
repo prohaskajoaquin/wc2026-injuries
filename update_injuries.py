@@ -83,11 +83,12 @@ payload = {
   "tools": [{"type": "web_search_20250305", "name": "web_search"}],
   "system": f"""You are a football journalist covering FIFA World Cup 2026. Today is {today}.
 Search the web for injury news about players in the official FIFA World Cup 2026 squads.
-Return ONLY a JSON array of injured/doubtful players. No markdown, no backticks, no explanation. Start with [ and end with ]:
-[{{"player":string,"team":string,"flag":string,"pos":string,"club":string,"status":"out"|"doubt","injury":string,"replacement":string|null,"timeline":string|null,"link":string,"link_label":string,"confirmed_date":string}}]""",
+After searching, wrap your JSON result in <injuries> tags like this:
+<injuries>[{{"player":string,"team":string,"flag":string,"pos":string,"club":string,"status":"out"|"doubt","injury":string,"replacement":string|null,"timeline":string|null,"link":string,"link_label":string,"confirmed_date":string}}]</injuries>
+The JSON must be inside <injuries> tags. Do not put any text inside the tags except the JSON array.""",
   "messages": [{
     "role": "user",
-    "content": f"Today is {today}. Search for FIFA World Cup 2026 injury news. Search: 'World Cup 2026 injury withdrawal', 'FIFA World Cup 2026 injured players', 'Mundial 2026 lesionados'. Return ONLY the raw JSON array."
+    "content": f"Today is {today}. Search for FIFA World Cup 2026 injury news. Search: 'World Cup 2026 injury withdrawal', 'FIFA World Cup 2026 injured players', 'Mundial 2026 lesionados'. Then wrap the JSON array inside <injuries> tags."
   }]
 }
 
@@ -112,16 +113,27 @@ for block in data.get('content', []):
 full_text = '\n'.join(texts)
 print("Claude response (first 300 chars):", full_text[:300])
 
-# Strip markdown and find JSON array
-clean_text = re.sub(r'```json\s*', '', full_text)
-clean_text = re.sub(r'```\s*', '', clean_text)
-
+# Extract JSON - try <injuries> tags first, then fallback
 players = []
-start = clean_text.find('[')
-end = clean_text.rfind(']')
-if start != -1 and end != -1 and end > start:
+json_str = ''
+tag_match = re.search(r'<injuries>([\s\S]*?)</injuries>', full_text)
+if tag_match:
+  json_str = tag_match.group(1).strip()
+  json_str = re.sub(r'```json\s*', '', json_str)
+  json_str = re.sub(r'```\s*', '', json_str).strip()
+  print("Found <injuries> tags")
+else:
+  clean_text = re.sub(r'```json\s*', '', full_text)
+  clean_text = re.sub(r'```\s*', '', clean_text)
+  start = clean_text.find('[')
+  end = clean_text.rfind(']')
+  if start != -1 and end != -1:
+    json_str = clean_text[start:end+1]
+  print("WARNING: No <injuries> tags, using fallback")
+
+if json_str:
   try:
-    raw_players = json.loads(clean_text[start:end+1])
+    raw_players = json.loads(json_str)
     # FILTER: only keep players in official squads
     for p in raw_players:
       if p.get('status') in ('out', 'doubt') and is_official_player(p.get('player', '')):
@@ -131,6 +143,7 @@ if start != -1 and end != -1 and end > start:
     print(f"Found {len(players)} official squad players with injuries")
   except Exception as e:
     print(f"ERROR parsing JSON: {e}")
+    print(f"JSON string (first 200): {json_str[:200]}")
 
 # --- Get previous data from KV ---
 kv_url = f'https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/values/injury_data'
